@@ -124,14 +124,9 @@ void IRAM_ATTR onAudioTimer()
         count++;
     }
 
-    // Soft-clip normalisation: avoids harsh square-wave clipping
-    int32_t out;
-    if (count > 1) {
-        // tanh approximation: y = x / (1 + |x|/128), centred at 128
-        out = mix * 128 / (128 + (mix < 0 ? -mix : mix)) + 128;
-    } else {
-        out = mix + 128;
-    }
+    // Average active voices then hard-clamp (avoids division in single-voice case)
+    if (count > 1) mix /= count;
+    int32_t out = mix + 128;
     if (out > 255) out = 255;
     if (out < 0)   out = 0;
 
@@ -247,27 +242,46 @@ static bool loadWav(int padIndex, const char *filename)
 
     f.seek(dataOffset);
 
-    for (uint32_t i = 0; i < storeFrames; i++) {
-        if (bitsPerSample == 8 && channels == 1) {
-            samples[padIndex].data[i] = (uint8_t)f.read();
+    if (bitsPerSample == 8 && channels == 1) {
+        // Fast path: single bulk read directly into the output buffer
+        f.read(samples[padIndex].data, storeFrames);
+    } else {
+        // Buffered path: read in 512-byte chunks, then convert each frame
+        const uint32_t RBUF_SZ = 512;
+        uint8_t  rbuf[RBUF_SZ];
+        uint32_t rpos = 0, rlen = 0;
 
-        } else if (bitsPerSample == 16 && channels == 1) {
-            uint8_t raw[2]; f.read(raw, 2);
-            int16_t s16; memcpy(&s16, raw, 2);
-            samples[padIndex].data[i] = (uint8_t)(s16 / 256 + 128);
+        for (uint32_t i = 0; i < storeFrames; i++) {
+            // Refill buffer when there is not enough data for one full frame
+            if (rlen - rpos < bytesPerFrame) {
+                uint32_t rem = rlen - rpos;
+                if (rem) memmove(rbuf, rbuf + rpos, rem);
+                rpos = 0;
+                rlen = rem + f.read(rbuf + rem, RBUF_SZ - rem);
+                if (rlen < bytesPerFrame) break;  // unexpected EOF
+            }
 
-        } else if (bitsPerSample == 16 && channels == 2) {
-            uint8_t raw[4]; f.read(raw, 4);
-            int16_t l, r; memcpy(&l, raw, 2); memcpy(&r, raw + 2, 2);
-            samples[padIndex].data[i] = (uint8_t)(((int32_t)l + r) / 512 + 128);
+            if (bitsPerSample == 16 && channels == 1) {
+                int16_t s16; memcpy(&s16, rbuf + rpos, 2); rpos += 2;
+                samples[padIndex].data[i] = (uint8_t)(s16 / 256 + 128);
 
-        } else if (bitsPerSample == 8 && channels == 2) {
-            uint8_t l = (uint8_t)f.read();
-            uint8_t r = (uint8_t)f.read();
-            samples[padIndex].data[i] = (uint8_t)(((int)l + r) / 2);
+            } else if (bitsPerSample == 16 && channels == 2) {
+                int16_t l, r;
+                memcpy(&l, rbuf + rpos,     2);
+                memcpy(&r, rbuf + rpos + 2, 2);
+                rpos += 4;
+                samples[padIndex].data[i] =
+                    (uint8_t)(((int32_t)l + r) / 512 + 128);
 
-        } else {
-            samples[padIndex].data[i] = 128; // silence for unsupported format
+            } else if (bitsPerSample == 8 && channels == 2) {
+                samples[padIndex].data[i] =
+                    (uint8_t)((rbuf[rpos] + rbuf[rpos + 1]) / 2);
+                rpos += 2;
+
+            } else {
+                rpos += bytesPerFrame;  // skip unsupported format
+                samples[padIndex].data[i] = 128;
+            }
         }
     }
 
@@ -537,10 +551,9 @@ static void ghDraw()
         oled.print(buf);
     }
 
-    // Lives (hearts)
-    for (int l = 0; l < ghLives; l++) {
-        oled.setCursor(104 + l * 8, 0);
-        oled.print("\x03"); // heart char in some font tables; fallback to 'v'
+    // Lives indicators (small filled squares — portable across all font sets)
+    for (int l = 0; l < ghLives && l < 3; l++) {
+        oled.fillRect(104 + l * 8, 1, 5, 5, SSD1306_WHITE);
     }
 
     // Lane separator lines (vertical)
@@ -797,6 +810,22 @@ refresh();
 
 // ── Route handlers ────────────────────────────────────────────
 
+// Escape a string for safe embedding in a JSON value
+static String jsonEscape(const String &s)
+{
+    String out;
+    out.reserve(s.length() + 4);
+    for (unsigned i = 0; i < s.length(); i++) {
+        char c = s[i];
+        if      (c == '"')  out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if ((uint8_t)c >= 0x20) out += c;  // skip control chars
+    }
+    return out;
+}
+
 static void handleRoot()
 {
     httpServer.send_P(200, "text/html", INDEX_HTML);
@@ -816,9 +845,7 @@ static void handleFiles()
             lower.toLowerCase();
             if (lower.endsWith(".wav")) {
                 if (!first) json += ",";
-                // Escape quotes in filename
-                name.replace("\"", "\\\"");
-                json += "\"" + name + "\"";
+                json += "\"" + jsonEscape(name) + "\"";
                 first = false;
             }
         }
@@ -833,9 +860,7 @@ static void handlePadMap()
     String json = "{";
     for (int i = 0; i < 12; i++) {
         if (i > 0) json += ",";
-        String fname = String(padMap[i]);
-        fname.replace("\"", "\\\"");
-        json += "\"pad" + String(i + 1) + "\":\"" + fname + "\"";
+        json += "\"pad" + String(i + 1) + "\":\"" + jsonEscape(String(padMap[i])) + "\"";
     }
     json += "}";
     httpServer.send(200, "application/json", json);
@@ -872,7 +897,8 @@ static void handleAssign()
     int padNum   = extractJsonInt(body, "pad");
     String fname = extractJsonString(body, "file");
 
-    if (padNum < 1 || padNum > 12 || fname.length() == 0) {
+    if (padNum < 1 || padNum > 12 || fname.length() == 0 ||
+        fname.indexOf("..") >= 0 || fname.indexOf('/') >= 0) {
         httpServer.send(400, "application/json",
                         "{\"ok\":false,\"error\":\"invalid parameters\"}");
         return;
@@ -918,7 +944,7 @@ static void handleDelete()
         return;
     }
     String fname = extractJsonString(httpServer.arg("plain"), "file");
-    if (fname.length() == 0) {
+    if (fname.length() == 0 || fname.indexOf("..") >= 0 || fname.indexOf('/') >= 0) {
         httpServer.send(400, "application/json",
                         "{\"ok\":false,\"error\":\"missing file\"}");
         return;
@@ -1067,12 +1093,11 @@ void setup()
     // ── Pad & bank buttons
     for (int i = 0; i < 12; i++) {
         pinMode(PAD_PINS[i], INPUT_PULLUP);
-        memset(&voices[i], 0, sizeof(Voice));
         samples[i] = { nullptr, 0, false, {} };
         padMap[i][0] = '\0';
     }
-    // Initialise remaining voice slots
-    for (int i = 12; i < MAX_VOICES; i++) memset(&voices[i], 0, sizeof(Voice));
+    // Initialise all voice slots (MAX_VOICES = 10, separate from the 12 pad slots)
+    for (int i = 0; i < MAX_VOICES; i++) memset(&voices[i], 0, sizeof(Voice));
     pinMode(BANK_PIN, INPUT_PULLUP);
 
     // ── LittleFS
