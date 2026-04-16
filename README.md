@@ -54,3 +54,119 @@ Hardware Toggle: Holding Pad 12 and tapping the Bank Button hides the synth UI a
 Physics Engine: Features gravity, acceleration, random pipe generation, and collision detection, running at roughly 30 Frames Per Second.
 
 Audio Integration: The game physically talks to the sampler engine. It automatically plays whatever .wav file is loaded into Pad 12 when you jump, and plays Pad 11 when you crash.
+
+---
+
+## Part 3: Flashing the Funbox OS to Your ESP32
+
+### Prerequisites
+
+**Hardware:**
+- ESP-WROOM-32S v1.1 (or compatible ESP32 dev board)
+- USB data cable (Micro-USB or USB-C — must be a data cable, not charge-only)
+
+**Software:**
+- [VS Code](https://code.visualstudio.com/) with the [PlatformIO extension](https://platformio.org/install/ide?install=vscode) installed
+
+---
+
+### Step 1: Install VS Code + PlatformIO
+
+1. Download and install **VS Code**.
+2. Open VS Code → go to the **Extensions** tab (Ctrl+Shift+X).
+3. Search for **PlatformIO IDE** and install it.
+4. Restart VS Code when prompted.
+
+---
+
+### Step 2: Open the Project
+
+1. In VS Code, click the **PlatformIO icon** (alien head) in the left sidebar.
+2. Click **"Open Project"** and navigate to the `funbox_os/` folder in this repo.
+3. PlatformIO will read `platformio.ini` and automatically detect:
+   - Board: `esp32dev`
+   - Framework: Arduino
+   - Required libraries: Adafruit SSD1306, Adafruit GFX, Adafruit BusIO
+
+---
+
+### Step 3: Install Dependencies
+
+PlatformIO installs libraries automatically on first build. To force it manually, open the PlatformIO terminal and run:
+
+```
+pio pkg install
+```
+
+---
+
+### Step 4: Connect Your ESP32
+
+1. Plug your ESP32 into your computer via USB.
+2. Confirm the driver is installed:
+   - **Windows:** Check Device Manager for a **CP2102** or **CH340** COM port.
+   - **Mac:** Run `ls /dev/tty.*` in Terminal and look for a new entry.
+   - **Linux:** Run `ls /dev/ttyUSB*` and look for a new entry.
+3. If no port appears, install the USB-Serial driver for your board:
+   - [CP2102 driver (SiLabs)](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers)
+   - [CH340 driver](https://www.wch-ic.com/downloads/CH341SER_EXE.html)
+
+---
+
+### Step 5: Build and Flash the Firmware
+
+1. In VS Code, click the **PlatformIO icon** → **Upload** (the right-arrow icon), OR run in the terminal:
+   ```
+   pio run --target upload
+   ```
+2. PlatformIO compiles the code and flashes it at 921,600 baud.
+3. If the upload times out or fails, **hold the BOOT button** on the ESP32 while the upload begins, then release it once it starts transferring.
+
+---
+
+### Step 6: Upload the Filesystem (LittleFS)
+
+The firmware uses **LittleFS** to store `.wav` sample files on the ESP32's internal flash. Flash the filesystem image separately:
+
+```
+pio run --target uploadfs
+```
+
+Or in VS Code: PlatformIO sidebar → **Platform** → **Upload Filesystem Image**.
+
+> Do this even if the `data/` folder is currently empty — it initializes the LittleFS partition so the web UI can store and manage samples.
+
+---
+
+### Step 7: Verify It's Working
+
+1. Open the **Serial Monitor** at **115,200 baud**:
+   ```
+   pio device monitor
+   ```
+2. Press the **Reset (EN)** button on your ESP32 and watch for boot messages.
+3. On your phone or laptop, look for a Wi-Fi network named **`Funbox-Modular`** — this confirms the firmware is running correctly.
+4. Connect to that network and open **`http://192.168.4.1`** in a browser to access the drag-and-drop sample UI.
+
+---
+
+### Quick Reference
+
+| Task | Command |
+|------|---------|
+| Install libraries | `pio pkg install` |
+| Build only | `pio run` |
+| Flash firmware | `pio run --target upload` |
+| Flash filesystem | `pio run --target uploadfs` |
+| Open serial monitor | `pio device monitor` |
+
+---
+
+### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| "No device found" | Install CP2102/CH340 driver; try a different USB cable |
+| Upload fails / times out | Hold **BOOT** on the ESP32 while the upload starts |
+| LittleFS errors in Serial | Run `pio run --target uploadfs` to initialize the partition |
+| Libraries not found | Run `pio pkg install` or let PlatformIO auto-resolve on first build |
